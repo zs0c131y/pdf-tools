@@ -32,3 +32,11 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# PDF Tools specific
+# Temporary PDF files
+temp_pdfs/
+*.tmp.pdf
+
+# Output directory for processed PDFs
+output/
