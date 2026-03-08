@@ -16,115 +16,225 @@
 
 package com.example.pdftools.ui
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.pdftools.data.PdfDocument
-import com.example.pdftools.data.PdfRepository
-import com.example.pdftools.data.PdfRepositoryImpl
+import com.example.pdftools.data.PdfOperations
+import com.example.pdftools.data.SplitOptions
+import com.example.pdftools.data.SplitType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import java.io.File
 
 data class PdfToolsUIState(
-    val pdfs: List<PdfDocument> = emptyList(),
-    val selectedPdfs: List<PdfDocument> = emptyList(),
-    val currentPdfId: Long? = null,
+    // Split tab state
+    val splitPdf: PdfDocument? = null,
+    val splitRangeText: String = "",
+    val splitSuccess: String? = null,
+    // Merge tab state — ordered list of PDFs to merge
+    val mergePdfs: List<PdfDocument> = emptyList(),
+    val mergeSuccess: String? = null,
+    // Files tab — all processed output files
+    val outputFiles: List<PdfDocument> = emptyList(),
+    // Global
     val isLoading: Boolean = false,
     val error: String? = null,
     val currentTab: PdfTab = PdfTab.SPLIT
 )
 
-enum class PdfTab {
-    SPLIT,
-    MERGE,
-    FILES
-}
+enum class PdfTab { SPLIT, MERGE, FILES }
 
-class PdfToolsViewModel(
-    private val pdfRepository: PdfRepository = PdfRepositoryImpl()
-) : ViewModel() {
-    
+class PdfToolsViewModel : ViewModel() {
+
     private val _uiState = MutableStateFlow(PdfToolsUIState())
     val uiState: StateFlow<PdfToolsUIState> = _uiState
-    
-    init {
-        loadPdfs()
-    }
-    
-    private fun loadPdfs() {
-        viewModelScope.launch {
-            pdfRepository.getAllPdfs()
-                .catch { e ->
-                    _uiState.value = _uiState.value.copy(
-                        error = e.message,
-                        isLoading = false
-                    )
-                }
-                .collect { pdfs ->
-                    _uiState.value = _uiState.value.copy(
-                        pdfs = pdfs,
-                        isLoading = false
-                    )
-                }
-        }
-    }
-    
+
     fun selectTab(tab: PdfTab) {
         _uiState.value = _uiState.value.copy(currentTab = tab)
     }
-    
-    fun togglePdfSelection(pdfId: Long) {
+
+    // ── Split ──────────────────────────────────────────────────────────────
+
+    fun setSplitPdf(pdf: PdfDocument) {
+        _uiState.value = _uiState.value.copy(splitPdf = pdf, splitSuccess = null)
+    }
+
+    fun setSplitRangeText(text: String) {
+        _uiState.value = _uiState.value.copy(splitRangeText = text)
+    }
+
+    fun splitAllPages(context: Context) {
+        val pdf = _uiState.value.splitPdf ?: return
         viewModelScope.launch {
-            val currentPdfs = _uiState.value.pdfs
-            val updatedPdfs = currentPdfs.map { pdf ->
-                if (pdf.id == pdfId) {
-                    pdf.copy(isSelected = !pdf.isSelected)
-                } else {
-                    pdf
+            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+            val ops = PdfOperations(context)
+            val outDir = File(context.filesDir, "split").apply { mkdirs() }
+            val result = ops.splitPdf(pdf.uri, SplitOptions(SplitType.ALL_PAGES), outDir)
+            result.fold(
+                onSuccess = { files ->
+                    val newDocs = files.mapIndexed { i, f ->
+                        PdfDocument(
+                            id = System.currentTimeMillis() + i,
+                            name = f.name,
+                            uriString = f.toURI().toString(),
+                            sizeInBytes = f.length(),
+                            pageCount = 1,
+                            lastModified = f.lastModified()
+                        )
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        outputFiles = _uiState.value.outputFiles + newDocs,
+                        splitSuccess = "Split into ${files.size} pages"
+                    )
+                },
+                onFailure = { e ->
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = "Split failed: ${e.message}"
+                    )
                 }
-            }
-            
-            val selectedPdfs = updatedPdfs.filter { it.isSelected }
-            _uiState.value = _uiState.value.copy(
-                selectedPdfs = selectedPdfs
             )
         }
     }
-    
-    fun addPdf(pdf: PdfDocument) {
-        viewModelScope.launch {
-            pdfRepository.addPdf(pdf)
+
+    fun splitCustomRange(context: Context) {
+        val pdf = _uiState.value.splitPdf ?: return
+        val ranges = parseRanges(_uiState.value.splitRangeText)
+        if (ranges.isEmpty()) {
+            _uiState.value = _uiState.value.copy(error = "Invalid page range")
+            return
         }
-    }
-    
-    fun removePdf(pdfId: Long) {
         viewModelScope.launch {
-            pdfRepository.removePdf(pdfId)
-        }
-    }
-    
-    fun clearSelection() {
-        viewModelScope.launch {
-            val currentPdfs = _uiState.value.pdfs
-            val updatedPdfs = currentPdfs.map { pdf ->
-                pdf.copy(isSelected = false)
-            }
-            _uiState.value = _uiState.value.copy(
-                selectedPdfs = emptyList()
+            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+            val ops = PdfOperations(context)
+            val outDir = File(context.filesDir, "split").apply { mkdirs() }
+            val result = ops.splitPdf(pdf.uri, SplitOptions(SplitType.CUSTOM_RANGE, ranges), outDir)
+            result.fold(
+                onSuccess = { files ->
+                    val newDocs = files.mapIndexed { i, f ->
+                        PdfDocument(
+                            id = System.currentTimeMillis() + i,
+                            name = f.name,
+                            uriString = f.toURI().toString(),
+                            sizeInBytes = f.length(),
+                            pageCount = ranges.getOrElse(i) { 1..1 }.count(),
+                            lastModified = f.lastModified()
+                        )
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        outputFiles = _uiState.value.outputFiles + newDocs,
+                        splitSuccess = "Split into ${files.size} parts"
+                    )
+                },
+                onFailure = { e ->
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = "Split failed: ${e.message}"
+                    )
+                }
             )
         }
     }
-    
-    fun setLoading(loading: Boolean) {
-        _uiState.value = _uiState.value.copy(isLoading = loading)
+
+    fun clearSplitSuccess() {
+        _uiState.value = _uiState.value.copy(splitSuccess = null)
     }
-    
-    fun setError(error: String?) {
-        _uiState.value = _uiState.value.copy(error = error)
+
+    // ── Merge ─────────────────────────────────────────────────────────────
+
+    fun addMergePdf(pdf: PdfDocument) {
+        val updated = _uiState.value.mergePdfs + pdf
+        _uiState.value = _uiState.value.copy(mergePdfs = updated, mergeSuccess = null)
     }
-    
+
+    fun removeMergePdf(id: Long) {
+        val updated = _uiState.value.mergePdfs.filter { it.id != id }
+        _uiState.value = _uiState.value.copy(mergePdfs = updated)
+    }
+
+    fun clearMergePdfs() {
+        _uiState.value = _uiState.value.copy(mergePdfs = emptyList(), mergeSuccess = null)
+    }
+
+    fun mergePdfs(context: Context) {
+        val pdfs = _uiState.value.mergePdfs
+        if (pdfs.size < 2) {
+            _uiState.value = _uiState.value.copy(error = "Select at least 2 PDFs to merge")
+            return
+        }
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+            val ops = PdfOperations(context)
+            val outDir = File(context.filesDir, "merged").apply { mkdirs() }
+            val outFile = File(outDir, "merged_${System.currentTimeMillis()}.pdf")
+            val result = ops.mergePdfs(pdfs.map { it.uri }, outFile)
+            result.fold(
+                onSuccess = { file ->
+                    val newDoc = PdfDocument(
+                        id = System.currentTimeMillis(),
+                        name = file.name,
+                        uriString = file.toURI().toString(),
+                        sizeInBytes = file.length(),
+                        pageCount = pdfs.sumOf { it.pageCount },
+                        lastModified = file.lastModified()
+                    )
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        mergePdfs = emptyList(),
+                        outputFiles = _uiState.value.outputFiles + newDoc,
+                        mergeSuccess = "Merged into ${file.name}"
+                    )
+                },
+                onFailure = { e ->
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = "Merge failed: ${e.message}"
+                    )
+                }
+            )
+        }
+    }
+
+    fun clearMergeSuccess() {
+        _uiState.value = _uiState.value.copy(mergeSuccess = null)
+    }
+
+    // ── Files ─────────────────────────────────────────────────────────────
+
+    fun removeOutputFile(id: Long) {
+        _uiState.value = _uiState.value.copy(
+            outputFiles = _uiState.value.outputFiles.filter { it.id != id }
+        )
+    }
+
+    // ── Misc ──────────────────────────────────────────────────────────────
+
     fun clearError() {
         _uiState.value = _uiState.value.copy(error = null)
+    }
+
+    private fun parseRanges(input: String): List<IntRange> {
+        return try {
+            input.split(",").mapNotNull { part ->
+                val trimmed = part.trim()
+                when {
+                    trimmed.contains("-") -> {
+                        val (a, b) = trimmed.split("-").map { it.trim().toInt() }
+                        a..b
+                    }
+                    trimmed.isNotEmpty() -> {
+                        val n = trimmed.toInt()
+                        n..n
+                    }
+                    else -> null
+                }
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 }

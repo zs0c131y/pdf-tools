@@ -64,17 +64,21 @@ class PdfOperations(private val context: Context) {
         outputFile: File
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
+            val destination = PDDocument()
             val merger = PDFMergerUtility()
-            
-            sourceUris.forEach { uri ->
-                context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                    merger.addSource(inputStream)
+            try {
+                for (uri in sourceUris) {
+                    val stream = context.contentResolver.openInputStream(uri)
+                        ?: throw IllegalStateException("Cannot open URI: $uri")
+                    val src = PDDocument.load(stream)
+                    merger.appendDocument(destination, src)
+                    src.close()
+                    stream.close()
                 }
+                destination.save(outputFile)
+            } finally {
+                destination.close()
             }
-            
-            merger.destinationFileName = outputFile.absolutePath
-            merger.mergeDocuments(null)
-            
             Result.success(outputFile)
         } catch (e: Exception) {
             Result.failure(e)
